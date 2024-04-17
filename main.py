@@ -6,7 +6,7 @@ from vertexai.language_models import TextGenerationModel
 
 app = Flask(__name__)
 
-# Helper function that reads from the config file. 
+# Helper function that reads from the config file.
 def get_config_value(config, section, key, default=None):
     """
     Retrieve a configuration value from a section with an optional default value.
@@ -44,42 +44,131 @@ def main():
 
     # The user asked a question and submitted the form
     # The request.method would equal 'POST'
-    else: 
+    else:
         question = request.form['input']
 
-        # Get the data to answer the question that 
+        # Get the data to answer the question that
         # most likely matches the question based on the embeddings
         data = search_vector_database(question)
 
-        # Ask Gemini to answer the question using the data 
+        # Ask Gemini to answer the question using the data
         # from the database
         answer = ask_gemini(question, data)
-        
+
     # Display the home page with the required variables set
     model = {"title": TITLE, "subtitle": SUBTITLE,
              "botname": BOTNAME, "message": answer, "input": question}
     return render_template('index.html', model=model)
 
 
-def search_vector_database(question):
+from vertexai.language_models import TextEmbeddingModel
 
-    # 1. Convert the question into an embedding
-    # 2. Search the Vector database for the 5 closest embeddings to the user's question
-    # 3. Get the IDs for the five embeddings that are returned
-    # 4. Get the five documents from Firestore that match the IDs
-    # 5. Concatenate the documents into a single string and return it
+def search_vector_database(question) -> list:
+  """Text embedding with a Large Language Model and prints the vector."""
 
-    data = ""
-    return data
+  model = TextEmbeddingModel.from_pretrained("textembedding-gecko@002")
+  embeddings = model.get_embeddings([question])
+  for embedding in embeddings:
+    vector = embedding.values
+  return vector
 
+PROJECT_ID = os.getenv("project_id")
+LOCATION = os.getenv("lab_region")
+
+# Initialization
+from google.cloud import aiplatform
+aiplatform.init(project=PROJECT_ID, location=LOCATION)
+
+from vertexai.language_models import TextEmbeddingInput
+
+QUESTION = "What is the minimum safe cooking temperature for chicken?"
+question_with_task_type  = TextEmbeddingInput(
+    text=QUESTION,
+    task_type="RETRIEVAL_QUERY"
+)
+
+my_index_endpoint = aiplatform.MatchingEngineIndexEndpoint(
+
+# YOu need to supply the full name of your endopoint
+# Get this from the Google Cloud console.
+index_endpoint_name="projects/qwiklabs-gcp-00-383cfded213e/locations/us-central1/indexEndpoints/8767193458583535616"
+    )
+
+QUESTION_EMBEDDING = search_vector_database(question_with_task_type)
+
+# run query
+response = my_index_endpoint.find_neighbors(
+    deployed_index_id = "assessment_index_deployed",
+    queries = [QUESTION_EMBEDDING],
+    num_neighbors = 5
+)
+
+# show the results
+for idx, neighbor in enumerate(response[0]):
+    print(f"{neighbor.distance:.2f} {neighbor.id}")
+
+DOCUMENT_URL = "fpc-manual.pdf"
+
+from langchain_community.document_loaders import PyPDFLoader
+
+pdf = PyPDFLoader(DOCUMENT_URL)
+pages = pdf.load_and_split()
+pages = [page.page_content for page in pages]
+
+ids = [i for i in range(len(pages))]
+
+from google.cloud import firestore
+db = firestore.Client()
+
+collection_name = "pdf_pages"
+
+documents = []
+for idx, neighbor in enumerate(response[0]):
+  id = str(neighbor.id)
+  document = db.collection(collection_name).document(id).get()
+  documents.append(document.to_dict()["page"])
+
+pages = "\n\n".join(documents)
+
+print(len(pages))
+
+import vertexai
+from vertexai.preview.generative_models import GenerativeModel, Part
 
 def ask_gemini(question, data):
-    # You will need to change the code below to ask Gemni to
-    # answer the user's question based on the data retrieved
-    # from their search
-    response = "Not implemented!"
-    return response
+  """
+  This function builds a prompt with the user question and data,
+  then sends it to Gemini to get the answer.
 
+  Args:
+      question: The user's question as a string.
+      data: The retrieved data from Firestore as a dictionary.
+
+  Returns:
+      The generated answer from Gemini as a string.
+  """
+
+  model = GenerativeModel("gemini-pro")
+  prompt = f"""
+  context: Answer the question using the following data.
+
+  Data: {pages}
+
+  question: {question}
+  answer:
+  """
+
+  response = model.generate_content(
+      prompt,
+      generation_config={
+          "max_output_tokens": 8192,
+          "temperature": 0.5,
+          "top_p": 0.5,
+          "top_k": 10,
+      },
+      stream=False
+  )
+  return response.text
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0', port=int(os.environ.get('PORT', 8080)))
